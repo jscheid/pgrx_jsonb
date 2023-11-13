@@ -277,12 +277,11 @@ impl<'a> JsonbScalar<'a> {
 pub unsafe fn iterate_jsonb<V, E, S: JsonbVisitor<V, E>>(
     jsonb: *mut pg_sys::Jsonb,
     mut visitor: S,
-    skip_root: JsonbTraversal,
 ) -> Result<V, E> {
     let mut it = pg_sys::JsonbIteratorInit(&mut (*jsonb).root);
     let result = {
         let mut val = pg_sys::JsonbValue::default();
-        let mut skip = skip_root;
+        let mut skip = JsonbTraversal::StepInto;
 
         loop {
             let token = unsafe {
@@ -359,7 +358,6 @@ fn jsonb_test(datum: pg_sys::Datum) -> bool {
         iterate_jsonb(
             detoasted as *mut pg_sys::Jsonb,
             SerdeValueBuilder::default(),
-            JsonbTraversal::SkipOver,
         )
         .unwrap()
     };
@@ -388,7 +386,6 @@ fn jsonb_to_text(datum: pg_sys::Datum) -> Option<String> {
         iterate_jsonb(
             detoasted as *mut pg_sys::Jsonb,
             SerdeValueBuilder::default(),
-            JsonbTraversal::SkipOver,
         )
         .unwrap()
     };
