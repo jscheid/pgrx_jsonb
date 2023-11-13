@@ -49,7 +49,7 @@ pub struct JsonbObject<'a> {
 }
 
 /// A value inside a JSONB document.
-pub enum JsonbValue<'a> {
+pub enum JsonbScalar<'a> {
     Null,
     String(JsonbString<'a>),
     Number(JsonbNumeric<'a>),
@@ -61,9 +61,9 @@ pub trait JsonbVisitor<T, E> {
     fn end_array(&mut self) -> Result<JsonbTraversal, E>;
     fn begin_object(&mut self, num_pairs: usize) -> Result<JsonbTraversal, E>;
     fn end_object(&mut self) -> Result<JsonbTraversal, E>;
-    fn key(&mut self, val: JsonbValue) -> Result<JsonbTraversal, E>;
-    fn value(&mut self, val: JsonbValue) -> Result<JsonbTraversal, E>;
-    fn elem(&mut self, val: JsonbValue) -> Result<JsonbTraversal, E>;
+    fn key(&mut self, val: JsonbScalar) -> Result<JsonbTraversal, E>;
+    fn value(&mut self, val: JsonbScalar) -> Result<JsonbTraversal, E>;
+    fn elem(&mut self, val: JsonbScalar) -> Result<JsonbTraversal, E>;
     fn done(&mut self) -> Result<T, E>;
 }
 
@@ -104,7 +104,7 @@ impl JsonbVisitor<serde_json::Value, ()> for SerdeValueBuilder {
         Ok(JsonbTraversal::StepInto)
     }
 
-    fn elem(&mut self, val: JsonbValue) -> Result<JsonbTraversal, ()> {
+    fn elem(&mut self, val: JsonbScalar) -> Result<JsonbTraversal, ()> {
         match self.state_stack.last_mut() {
             Some(SerdeValueBuilderState::Array(ref mut vec)) => {
                 vec.push(val.to_serde_json_value()?);
@@ -136,8 +136,8 @@ impl JsonbVisitor<serde_json::Value, ()> for SerdeValueBuilder {
         Ok(JsonbTraversal::StepInto)
     }
 
-    fn key(&mut self, val: JsonbValue) -> Result<JsonbTraversal, ()> {
-        let key = if let JsonbValue::String(str) = val {
+    fn key(&mut self, val: JsonbScalar) -> Result<JsonbTraversal, ()> {
+        let key = if let JsonbScalar::String(str) = val {
             str.as_ref().to_os_string().into_string().or(Err(()))?
         } else {
             panic!("Non-String key");
@@ -152,7 +152,7 @@ impl JsonbVisitor<serde_json::Value, ()> for SerdeValueBuilder {
         Ok(JsonbTraversal::StepInto)
     }
 
-    fn value(&mut self, val: JsonbValue) -> Result<JsonbTraversal, ()> {
+    fn value(&mut self, val: JsonbScalar) -> Result<JsonbTraversal, ()> {
         match self.state_stack.pop() {
             Some(SerdeValueBuilderState::Object(mut map, Some(key))) => {
                 map.insert(key, val.to_serde_json_value()?);
@@ -218,7 +218,7 @@ impl<'a> AsRef<CStr> for JsonbNumeric<'a> {
     }
 }
 
-impl<'a> JsonbValue<'a> {
+impl<'a> JsonbScalar<'a> {
     fn to_serde_json_value(&self) -> Result<serde_json::Value, ()> {
         Ok(match self {
             Self::Null => serde_json::Value::Null,
@@ -238,7 +238,7 @@ impl<'a> JsonbValue<'a> {
     }
 }
 
-impl<'a> fmt::Display for JsonbValue<'a> {
+impl<'a> fmt::Display for JsonbScalar<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.to_serde_json_value().or(Err(fmt::Error))?)
     }
@@ -272,7 +272,7 @@ impl<'a> JsonbObject<'a> {
     }
 }
 
-impl<'a> JsonbValue<'a> {
+impl<'a> JsonbScalar<'a> {
     fn from_pg_sys(val: &'a pg_sys::JsonbValue) -> Self {
         match val.type_ {
             JBV_NULL => Self::Null,
@@ -323,7 +323,7 @@ pub unsafe fn iterate_jsonb<V, E, S: JsonbVisitor<V, E>>(
                 WJB_DONE => {
                     break visitor.done();
                 }
-                WJB_KEY => visitor.key(JsonbValue::from_pg_sys(&val))?,
+                WJB_KEY => visitor.key(JsonbScalar::from_pg_sys(&val))?,
                 token if matches!(token, WJB_VALUE | WJB_ELEM) => {
                     if val.type_ == JBV_BINARY {
                         todo!("binary handling");
@@ -331,7 +331,7 @@ pub unsafe fn iterate_jsonb<V, E, S: JsonbVisitor<V, E>>(
                         // - it doesn't seem like we can access the array/object in bulk
                         // - we can report skipped_array/skipped_object with element/pair count to the visitor?
                     } else {
-                        let value = JsonbValue::from_pg_sys(&val);
+                        let value = JsonbScalar::from_pg_sys(&val);
                         if token == WJB_VALUE {
                             visitor.value(value)?
                         } else {
