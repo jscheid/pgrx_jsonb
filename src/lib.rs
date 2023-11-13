@@ -29,24 +29,16 @@ pub enum JsonbTraversal {
 }
 
 /// An opaque reference to a string inside a JSONB document.
-pub struct JsonbString<'a> {
-    inner: &'a JsonbRawString,
-}
+pub struct JsonbString<'a>(&'a JsonbRawString);
 
 /// An opaque reference to a numeric inside a JSONB document.
-pub struct JsonbNumeric<'a> {
-    inner: &'a pg_sys::Numeric,
-}
+pub struct JsonbNumeric<'a>(&'a pg_sys::Numeric);
 
 /// An opaque reference to an array inside a JSONB document.
-pub struct JsonbArray<'a> {
-    inner: &'a JsonbRawArray,
-}
+pub struct JsonbArray<'a>(&'a JsonbRawArray);
 
 /// An opaque reference to an object inside a JSONB document.
-pub struct JsonbObject<'a> {
-    inner: &'a JsonbRawObject,
-}
+pub struct JsonbObject<'a>(&'a JsonbRawObject);
 
 /// A value inside a JSONB document.
 pub enum JsonbScalar<'a> {
@@ -195,11 +187,8 @@ impl<'a> AsRef<OsStr> for JsonbString<'a> {
     fn as_ref(&self) -> &OsStr {
         let slice = unsafe {
             std::slice::from_raw_parts(
-                self.inner.val as *mut u8,
-                self.inner
-                    .len
-                    .try_into()
-                    .expect("i32 should fit into usize"),
+                self.0.val as *mut u8,
+                self.0.len.try_into().expect("i32 should fit into usize"),
             )
         };
         OsStr::from_bytes(slice)
@@ -211,7 +200,7 @@ impl<'a> AsRef<CStr> for JsonbNumeric<'a> {
         unsafe {
             direct_function_call::<&CStr>(
                 pg_sys::numeric_out,
-                &[Some(pg_sys::Datum::from(*self.inner))],
+                &[Some(pg_sys::Datum::from(*self.0))],
             )
         }
         .expect("should return a &CStr")
@@ -227,7 +216,7 @@ impl<'a> JsonbScalar<'a> {
                 serde_json::Value::String(str)
             }
             Self::Number(str) => serde_json::Value::Number(
-                // Safe to assume PostgreSQL doesn't emit unicode in numerics
+                // Safe to assume PostgreSQL doesn't emit non-ASCII7 in numerics
                 serde_json::value::Number::from_str(unsafe {
                     std::str::from_utf8_unchecked(str.as_ref().to_bytes())
                 })
@@ -246,14 +235,11 @@ impl<'a> fmt::Display for JsonbScalar<'a> {
 
 impl<'a> JsonbArray<'a> {
     pub fn len(&self) -> usize {
-        self.inner
-            .nElems
-            .try_into()
-            .expect("i32 should fit into usize")
+        self.0.nElems.try_into().expect("i32 should fit into usize")
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.nElems == 0
+        self.0.nElems == 0
     }
 }
 
@@ -261,14 +247,11 @@ pub struct JsonbPair<'a>(&'a pg_sys::JsonbPair);
 
 impl<'a> JsonbObject<'a> {
     pub fn len(&self) -> usize {
-        self.inner
-            .nPairs
-            .try_into()
-            .expect("i32 should fit into usize")
+        self.0.nPairs.try_into().expect("i32 should fit into usize")
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.nPairs == 0
+        self.0.nPairs == 0
     }
 }
 
@@ -276,12 +259,8 @@ impl<'a> JsonbScalar<'a> {
     fn from_pg_sys(val: &'a pg_sys::JsonbValue) -> Self {
         match val.type_ {
             JBV_NULL => Self::Null,
-            JBV_STRING => Self::String(JsonbString {
-                inner: unsafe { &val.val.string },
-            }),
-            JBV_NUMERIC => Self::Number(JsonbNumeric {
-                inner: unsafe { &val.val.numeric },
-            }),
+            JBV_STRING => Self::String(JsonbString(unsafe { &val.val.string })),
+            JBV_NUMERIC => Self::Number(JsonbNumeric(unsafe { &val.val.numeric })),
             JBV_BOOL => Self::Bool(unsafe { val.val.boolean }),
             JBV_DATETIME => todo!("datetime support"),
             _ => panic!("Unknown JsonValue type"),
