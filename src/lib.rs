@@ -135,9 +135,10 @@ impl JsonbVisitor<serde_json::Value, ()> for SerdeValueBuilder {
             panic!("Non-String key");
         };
 
-        if let Some(SerdeValueBuilderState::Object(map, None)) = self.state_stack.pop() {
-            self.state_stack
-                .push(SerdeValueBuilderState::Object(map, Some(key)));
+        if let Some(SerdeValueBuilderState::Object(_, ref mut maybe_key)) =
+            self.state_stack.last_mut()
+        {
+            assert!(maybe_key.replace(key).is_none());
         } else {
             panic!("Unexpected state");
         }
@@ -145,15 +146,13 @@ impl JsonbVisitor<serde_json::Value, ()> for SerdeValueBuilder {
     }
 
     fn value(&mut self, val: JsonbScalar) -> Result<JsonbTraversal, ()> {
-        match self.state_stack.pop() {
-            Some(SerdeValueBuilderState::Object(mut map, Some(key))) => {
-                map.insert(key, val.to_serde_json_value()?);
-                self.state_stack
-                    .push(SerdeValueBuilderState::Object(map, None));
-            }
-            other => {
-                panic!("Unexpected state {other:?} for value");
-            }
+        if let Some(SerdeValueBuilderState::Object(ref mut map, ref mut maybe_key)) =
+            self.state_stack.last_mut()
+        {
+            let key = maybe_key.take().expect("Missing key");
+            map.insert(key, val.to_serde_json_value()?);
+        } else {
+            panic!("Unexpected state");
         }
         Ok(JsonbTraversal::StepInto)
     }
