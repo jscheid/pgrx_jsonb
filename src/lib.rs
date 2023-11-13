@@ -234,14 +234,23 @@ impl<'a> JsonbValue<'a> {
                     .or(Err(()))?,
             ),
             Self::Bool(val) => serde_json::Value::Bool(*val),
+
+            // FIXME: dead code, it doesn't seem like we can access elements in bulk.
             Self::Array(val) => serde_json::Value::Array(
                 val.iter()
                     .map(|v| v.to_serde_json_value())
                     .collect::<Result<Vec<_>, _>>()?,
             ),
+
+            // FIXME: dead code, it doesn't seem like we can access pairs in bulk.
             Self::Object(val) => serde_json::Value::Object(
                 val.iter()
-                    .map(|(key, value)| Ok((key.to_string(), value.to_serde_json_value()?)))
+                    .map(|pair| {
+                        let key = JsonbValue::from_pg_sys(&pair.0.key);
+                        let value = JsonbValue::from_pg_sys(&pair.0.value);
+
+                        Ok((key.to_string(), value.to_serde_json_value()?))
+                    })
                     .collect::<Result<serde_json::Map<_, _>, _>>()?,
             ),
         })
@@ -266,6 +275,11 @@ impl<'a> JsonbArray<'a> {
         self.inner.nElems == 0
     }
 
+    // FIXME: dead code, it doesn't seem like we can access elements in bulk.
+    //
+    // > However, clients should not take it upon themselves to touch array
+    // > or Object element/pair buffers, since their element/pair pointers are
+    // > garbage.
     pub fn iter(
         &self,
     ) -> std::iter::Map<
@@ -278,11 +292,13 @@ impl<'a> JsonbArray<'a> {
             self.inner.rawScalar
         );
 
-        unsafe { std::slice::from_raw_parts(self.inner.elems, self.len()) }
+        unsafe { std::slice::from_raw_parts::<'a>(self.inner.elems, self.len()) }
             .iter()
             .map(JsonbValue::from_pg_sys)
     }
 }
+
+pub struct JsonbPair<'a>(&'a pg_sys::JsonbPair);
 
 impl<'a> JsonbObject<'a> {
     pub fn len(&self) -> usize {
@@ -296,23 +312,22 @@ impl<'a> JsonbObject<'a> {
         self.inner.nPairs == 0
     }
 
+    // FIXME: dead code, it doesn't seem like we can access pairs in bulk.
+    //
+    // > However, clients should not take it upon themselves to touch array
+    // > or Object element/pair buffers, since their element/pair pointers are
+    // > garbage.
     pub fn iter(
         &self,
     ) -> std::iter::Map<
         std::slice::Iter<'_, pg_sys::JsonbPair>,
-        impl FnMut(&'a pg_sys::JsonbPair) -> (JsonbValue<'a>, JsonbValue<'a>),
+        impl FnMut(&'a pg_sys::JsonbPair) -> JsonbPair<'a>,
     > {
-        unsafe { std::slice::from_raw_parts(self.inner.pairs, self.len()) }
+        pgrx::info!("iterate over object, len={}", self.len());
+
+        unsafe { std::slice::from_raw_parts::<'a>(self.inner.pairs, self.len()) }
             .iter()
-            .map(
-                |pg_sys::JsonbPair {
-                     key,
-                     value,
-                     order: _order,
-                 }| {
-                    (JsonbValue::from_pg_sys(key), JsonbValue::from_pg_sys(value))
-                },
-            )
+            .map(|pair| JsonbPair(&pair))
     }
 }
 
@@ -376,17 +391,10 @@ pub unsafe fn iterate_jsonb<V, E, S: JsonbVisitor<V, E>>(
                 WJB_KEY => visitor.key(JsonbValue::from_pg_sys(&val))?,
                 token if matches!(token, WJB_VALUE | WJB_ELEM) => {
                     if val.type_ == JBV_BINARY {
-                        let mut it = pg_sys::JsonbIteratorInit(val.val.binary.data);
-                        let mut nested_val = pg_sys::JsonbValue::default();
-
-                        // FIXME: we want iteratorFromContainer + freeAndGetParent
-                        pg_sys::JsonbIteratorNext(&mut it, &mut nested_val, false);
-                        let value = JsonbValue::from_pg_sys(&nested_val);
-                        if token == WJB_VALUE {
-                            visitor.value(value)?
-                        } else {
-                            visitor.elem(value)?
-                        }
+                        todo!("binary handling");
+                        // Not yet sure what to do here:
+                        // - it doesn't seem like we can access the array/object in bulk
+                        // - we can report skipped_array/skipped_object with element/pair count to the visitor?
                     } else {
                         let value = JsonbValue::from_pg_sys(&val);
                         if token == WJB_VALUE {
