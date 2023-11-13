@@ -242,8 +242,6 @@ impl<'a> JsonbArray<'a> {
     }
 }
 
-pub struct JsonbPair<'a>(&'a pg_sys::JsonbPair);
-
 impl<'a> JsonbObject<'a> {
     pub fn len(&self) -> usize {
         self.0.nPairs.try_into().expect("i32 should fit into usize")
