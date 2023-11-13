@@ -230,8 +230,11 @@ impl<'a> JsonbValue<'a> {
                 serde_json::Value::String(str)
             }
             Self::Number(str) => serde_json::Value::Number(
-                serde_json::value::Number::from_str(str.as_ref().to_str().or(Err(()))?)
-                    .or(Err(()))?,
+                // Safe to assume PostgreSQL doesn't emit unicode in numerics
+                serde_json::value::Number::from_str(unsafe {
+                    std::str::from_utf8_unchecked(str.as_ref().to_bytes())
+                })
+                .or(Err(()))?,
             ),
             Self::Bool(val) => serde_json::Value::Bool(*val),
 
