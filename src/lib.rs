@@ -54,8 +54,6 @@ pub enum JsonbValue<'a> {
     String(JsonbString<'a>),
     Number(JsonbNumeric<'a>),
     Bool(bool),
-    Array(JsonbArray<'a>),
-    Object(JsonbObject<'a>),
 }
 
 pub trait JsonbVisitor<T, E> {
@@ -171,7 +169,6 @@ impl JsonbVisitor<serde_json::Value, ()> for SerdeValueBuilder {
     fn end_object(&mut self) -> Result<JsonbTraversal, ()> {
         match self.state_stack.pop() {
             Some(SerdeValueBuilderState::Object(map, None)) => {
-                // FIXME: compact map here?
                 self.push_value(serde_json::Value::Object(map));
             }
             other => {
@@ -237,25 +234,6 @@ impl<'a> JsonbValue<'a> {
                 .or(Err(()))?,
             ),
             Self::Bool(val) => serde_json::Value::Bool(*val),
-
-            // FIXME: dead code, it doesn't seem like we can access elements in bulk.
-            Self::Array(val) => serde_json::Value::Array(
-                val.iter()
-                    .map(|v| v.to_serde_json_value())
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
-
-            // FIXME: dead code, it doesn't seem like we can access pairs in bulk.
-            Self::Object(val) => serde_json::Value::Object(
-                val.iter()
-                    .map(|pair| {
-                        let key = JsonbValue::from_pg_sys(&pair.0.key);
-                        let value = JsonbValue::from_pg_sys(&pair.0.value);
-
-                        Ok((key.to_string(), value.to_serde_json_value()?))
-                    })
-                    .collect::<Result<serde_json::Map<_, _>, _>>()?,
-            ),
         })
     }
 }
@@ -277,28 +255,6 @@ impl<'a> JsonbArray<'a> {
     pub fn is_empty(&self) -> bool {
         self.inner.nElems == 0
     }
-
-    // FIXME: dead code, it doesn't seem like we can access elements in bulk.
-    //
-    // > However, clients should not take it upon themselves to touch array
-    // > or Object element/pair buffers, since their element/pair pointers are
-    // > garbage.
-    pub fn iter(
-        &self,
-    ) -> std::iter::Map<
-        std::slice::Iter<'_, pg_sys::JsonbValue>,
-        impl FnMut(&'a pg_sys::JsonbValue) -> JsonbValue<'a>,
-    > {
-        pgrx::info!(
-            "iterate over array, len={} rawScalar={}",
-            self.len(),
-            self.inner.rawScalar
-        );
-
-        unsafe { std::slice::from_raw_parts::<'a>(self.inner.elems, self.len()) }
-            .iter()
-            .map(JsonbValue::from_pg_sys)
-    }
 }
 
 pub struct JsonbPair<'a>(&'a pg_sys::JsonbPair);
@@ -314,24 +270,6 @@ impl<'a> JsonbObject<'a> {
     pub fn is_empty(&self) -> bool {
         self.inner.nPairs == 0
     }
-
-    // FIXME: dead code, it doesn't seem like we can access pairs in bulk.
-    //
-    // > However, clients should not take it upon themselves to touch array
-    // > or Object element/pair buffers, since their element/pair pointers are
-    // > garbage.
-    pub fn iter(
-        &self,
-    ) -> std::iter::Map<
-        std::slice::Iter<'_, pg_sys::JsonbPair>,
-        impl FnMut(&'a pg_sys::JsonbPair) -> JsonbPair<'a>,
-    > {
-        pgrx::info!("iterate over object, len={}", self.len());
-
-        unsafe { std::slice::from_raw_parts::<'a>(self.inner.pairs, self.len()) }
-            .iter()
-            .map(|pair| JsonbPair(&pair))
-    }
 }
 
 impl<'a> JsonbValue<'a> {
@@ -345,12 +283,6 @@ impl<'a> JsonbValue<'a> {
                 inner: unsafe { &val.val.numeric },
             }),
             JBV_BOOL => Self::Bool(unsafe { val.val.boolean }),
-            JBV_ARRAY => Self::Array(JsonbArray {
-                inner: unsafe { &val.val.array },
-            }),
-            JBV_OBJECT => Self::Object(JsonbObject {
-                inner: unsafe { &val.val.object },
-            }),
             JBV_DATETIME => todo!("datetime support"),
             _ => panic!("Unknown JsonValue type"),
         }
