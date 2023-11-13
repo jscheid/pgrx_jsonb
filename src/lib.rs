@@ -455,6 +455,35 @@ fn jsonb_test(datum: pg_sys::Datum) -> bool {
     matches!(result, serde_json::Value::Object(_))
 }
 
+#[pg_extern(sql = r#"
+    CREATE FUNCTION "jsonb_to_text"(jsonb) RETURNS text
+    STRICT
+    LANGUAGE c /* Rust */
+    AS '@MODULE_PATHNAME@', '@FUNCTION_NAME@';
+"#)]
+fn jsonb_to_text(datum: pg_sys::Datum) -> Option<String> {
+    let varlena = datum.cast_mut_ptr();
+    let detoasted = unsafe { pg_sys::pg_detoast_datum_packed(varlena) };
+
+    let result = unsafe {
+        iterate_jsonb(
+            detoasted as *mut pg_sys::Jsonb,
+            SerdeValueBuilder::default(),
+            JsonbTraversal::SkipOver,
+        )
+        .unwrap()
+    };
+
+    if detoasted != varlena {
+        unsafe {
+            pg_sys::pfree(detoasted as pgrx::void_mut_ptr);
+        }
+    }
+
+    // Ensure nothing gets optimized away
+    Some(serde_json::to_string(&result).expect("should be able to print serde_json::Value"))
+}
+
 #[pg_extern]
 fn jsonb_test2(datum: pgrx::JsonB) -> bool {
     // Ensure nothing gets optimized away
