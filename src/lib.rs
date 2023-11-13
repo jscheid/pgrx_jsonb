@@ -12,7 +12,6 @@ use pgrx::pg_sys::{
     JsonbValue__bindgen_ty_1__bindgen_ty_1 as JsonbRawString,
     JsonbValue__bindgen_ty_1__bindgen_ty_2 as JsonbRawArray,
     JsonbValue__bindgen_ty_1__bindgen_ty_3 as JsonbRawObject,
-    JsonbValue__bindgen_ty_1__bindgen_ty_4 as JsonbRawBinary,
 };
 use pgrx::prelude::*;
 use pgrx::{direct_function_call, pg_sys};
@@ -49,11 +48,6 @@ pub struct JsonbObject<'a> {
     inner: &'a JsonbRawObject,
 }
 
-/// An opaque reference to a binary inside a JSONB document.
-pub struct JsonbBinary<'a> {
-    inner: &'a JsonbRawBinary,
-}
-
 /// A value inside a JSONB document.
 pub enum JsonbValue<'a> {
     Null,
@@ -62,13 +56,12 @@ pub enum JsonbValue<'a> {
     Bool(bool),
     Array(JsonbArray<'a>),
     Object(JsonbObject<'a>),
-    Binary(JsonbBinary<'a>),
 }
 
 pub trait JsonbVisitor<T, E> {
-    fn begin_array(&mut self) -> Result<JsonbTraversal, E>;
+    fn begin_array(&mut self, num_elems: usize) -> Result<JsonbTraversal, E>;
     fn end_array(&mut self) -> Result<JsonbTraversal, E>;
-    fn begin_object(&mut self) -> Result<JsonbTraversal, E>;
+    fn begin_object(&mut self, num_pairs: usize) -> Result<JsonbTraversal, E>;
     fn end_object(&mut self) -> Result<JsonbTraversal, E>;
     fn key(&mut self, val: JsonbValue) -> Result<JsonbTraversal, E>;
     fn value(&mut self, val: JsonbValue) -> Result<JsonbTraversal, E>;
@@ -107,8 +100,9 @@ impl SerdeValueBuilder {
 }
 
 impl JsonbVisitor<serde_json::Value, ()> for SerdeValueBuilder {
-    fn begin_array(&mut self) -> Result<JsonbTraversal, ()> {
-        self.state_stack.push(SerdeValueBuilderState::Array(vec![]));
+    fn begin_array(&mut self, num_elems: usize) -> Result<JsonbTraversal, ()> {
+        self.state_stack
+            .push(SerdeValueBuilderState::Array(Vec::with_capacity(num_elems)));
         Ok(JsonbTraversal::StepInto)
     }
 
@@ -127,7 +121,6 @@ impl JsonbVisitor<serde_json::Value, ()> for SerdeValueBuilder {
     fn end_array(&mut self) -> Result<JsonbTraversal, ()> {
         match self.state_stack.pop() {
             Some(SerdeValueBuilderState::Array(val)) => {
-                //val.shrink_to_fit();
                 self.push_value(serde_json::Value::Array(val));
             }
             other => {
@@ -137,9 +130,11 @@ impl JsonbVisitor<serde_json::Value, ()> for SerdeValueBuilder {
         Ok(JsonbTraversal::StepInto)
     }
 
-    fn begin_object(&mut self) -> Result<JsonbTraversal, ()> {
-        self.state_stack
-            .push(SerdeValueBuilderState::Object(serde_json::Map::new(), None));
+    fn begin_object(&mut self, num_pairs: usize) -> Result<JsonbTraversal, ()> {
+        self.state_stack.push(SerdeValueBuilderState::Object(
+            serde_json::Map::with_capacity(num_pairs),
+            None,
+        ));
         Ok(JsonbTraversal::StepInto)
     }
 
@@ -202,7 +197,13 @@ impl JsonbVisitor<serde_json::Value, ()> for SerdeValueBuilder {
 impl<'a> AsRef<OsStr> for JsonbString<'a> {
     fn as_ref(&self) -> &OsStr {
         let slice = unsafe {
-            std::slice::from_raw_parts(self.inner.val as *mut u8, self.inner.len as usize)
+            std::slice::from_raw_parts(
+                self.inner.val as *mut u8,
+                self.inner
+                    .len
+                    .try_into()
+                    .expect("i32 should fit into usize"),
+            )
         };
         OsStr::from_bytes(slice)
     }
@@ -243,7 +244,6 @@ impl<'a> JsonbValue<'a> {
                     .map(|(key, value)| Ok((key.to_string(), value.to_serde_json_value()?)))
                     .collect::<Result<serde_json::Map<_, _>, _>>()?,
             ),
-            Self::Binary(_val) => todo!(),
         })
     }
 }
@@ -270,9 +270,15 @@ impl<'a> JsonbArray<'a> {
         &self,
     ) -> std::iter::Map<
         std::slice::Iter<'_, pg_sys::JsonbValue>,
-        impl FnMut(&'a pgrx::pg_sys::JsonbValue) -> JsonbValue<'a>,
+        impl FnMut(&'a pg_sys::JsonbValue) -> JsonbValue<'a>,
     > {
-        unsafe { std::slice::from_raw_parts(self.inner.elems, self.inner.nElems as usize) }
+        pgrx::info!(
+            "iterate over array, len={} rawScalar={}",
+            self.len(),
+            self.inner.rawScalar
+        );
+
+        unsafe { std::slice::from_raw_parts(self.inner.elems, self.len()) }
             .iter()
             .map(JsonbValue::from_pg_sys)
     }
@@ -294,9 +300,9 @@ impl<'a> JsonbObject<'a> {
         &self,
     ) -> std::iter::Map<
         std::slice::Iter<'_, pg_sys::JsonbPair>,
-        impl FnMut(&'a pgrx::pg_sys::JsonbPair) -> (JsonbValue<'a>, JsonbValue<'a>),
+        impl FnMut(&'a pg_sys::JsonbPair) -> (JsonbValue<'a>, JsonbValue<'a>),
     > {
-        unsafe { std::slice::from_raw_parts(self.inner.pairs, self.inner.nPairs as usize) }
+        unsafe { std::slice::from_raw_parts(self.inner.pairs, self.len()) }
             .iter()
             .map(
                 |pg_sys::JsonbPair {
@@ -327,10 +333,7 @@ impl<'a> JsonbValue<'a> {
             JBV_OBJECT => Self::Object(JsonbObject {
                 inner: unsafe { &val.val.object },
             }),
-            JBV_BINARY => Self::Binary(JsonbBinary {
-                inner: unsafe { &val.val.binary },
-            }),
-            JBV_DATETIME => todo!(),
+            JBV_DATETIME => todo!("datetime support"),
             _ => panic!("Unknown JsonValue type"),
         }
     }
@@ -348,34 +351,79 @@ impl<'a> JsonbValue<'a> {
 pub unsafe fn iterate_jsonb<V, E, S: JsonbVisitor<V, E>>(
     jsonb: *mut pg_sys::Jsonb,
     mut visitor: S,
+    skip_root: JsonbTraversal,
 ) -> Result<V, E> {
     let mut it = pg_sys::JsonbIteratorInit(&mut (*jsonb).root);
-    let mut val = pg_sys::JsonbValue::default();
-    let mut skip = JsonbTraversal::StepInto; // FIXME: should be configurable
+    let result = {
+        let mut val = pg_sys::JsonbValue::default();
+        let mut skip = skip_root;
 
-    loop {
-        let token = unsafe {
-            pg_sys::JsonbIteratorNext(
-                &mut it,
-                &mut val,
-                match skip {
-                    JsonbTraversal::StepInto => false,
-                    JsonbTraversal::SkipOver => true,
-                },
-            )
-        };
-        skip = match token {
-            WJB_DONE => return visitor.done(),
-            WJB_KEY => visitor.key(JsonbValue::from_pg_sys(&val))?,
-            WJB_VALUE => visitor.value(JsonbValue::from_pg_sys(&val))?,
-            WJB_ELEM => visitor.elem(JsonbValue::from_pg_sys(&val))?,
-            WJB_BEGIN_ARRAY => visitor.begin_array()?,
-            WJB_END_ARRAY => visitor.end_array()?,
-            WJB_BEGIN_OBJECT => visitor.begin_object()?,
-            WJB_END_OBJECT => visitor.end_object()?,
-            _ => panic!("Invalid iterator state"),
-        };
-    }
+        loop {
+            let token = unsafe {
+                pg_sys::JsonbIteratorNext(
+                    &mut it,
+                    &mut val,
+                    match skip {
+                        JsonbTraversal::StepInto => false,
+                        JsonbTraversal::SkipOver => true,
+                    },
+                )
+            };
+            skip = match token {
+                WJB_DONE => {
+                    break visitor.done();
+                }
+                WJB_KEY => visitor.key(JsonbValue::from_pg_sys(&val))?,
+                token if matches!(token, WJB_VALUE | WJB_ELEM) => {
+                    if val.type_ == JBV_BINARY {
+                        let mut it = pg_sys::JsonbIteratorInit(val.val.binary.data);
+                        let mut nested_val = pg_sys::JsonbValue::default();
+
+                        // FIXME: we want iteratorFromContainer + freeAndGetParent
+                        pg_sys::JsonbIteratorNext(&mut it, &mut nested_val, false);
+                        let value = JsonbValue::from_pg_sys(&nested_val);
+                        if token == WJB_VALUE {
+                            visitor.value(value)?
+                        } else {
+                            visitor.elem(value)?
+                        }
+                    } else {
+                        let value = JsonbValue::from_pg_sys(&val);
+                        if token == WJB_VALUE {
+                            visitor.value(value)?
+                        } else {
+                            visitor.elem(value)?
+                        }
+                    }
+                }
+                WJB_BEGIN_ARRAY => {
+                    assert!(val.type_ == JBV_ARRAY);
+                    visitor.begin_array(
+                        val.val
+                            .array
+                            .nElems
+                            .try_into()
+                            .expect("i32 should fit into usize"),
+                    )?
+                }
+                WJB_END_ARRAY => visitor.end_array()?,
+                WJB_BEGIN_OBJECT => {
+                    assert!(val.type_ == JBV_OBJECT);
+                    visitor.begin_object(
+                        val.val
+                            .object
+                            .nPairs
+                            .try_into()
+                            .expect("i32 should fit into usize"),
+                    )?
+                }
+                WJB_END_OBJECT => visitor.end_object()?,
+                _ => panic!("Invalid iterator state"),
+            };
+        }
+    };
+
+    result
 }
 
 #[pg_extern(sql = r#"
@@ -392,6 +440,7 @@ fn jsonb_test(datum: pg_sys::Datum) -> bool {
         iterate_jsonb(
             detoasted as *mut pg_sys::Jsonb,
             SerdeValueBuilder::default(),
+            JsonbTraversal::SkipOver,
         )
         .unwrap()
     };
